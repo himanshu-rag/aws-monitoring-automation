@@ -1237,6 +1237,7 @@ def configure_ec2_alarms(sns_topic_arn):
         
         # Status Check — uses Maximum statistic, breaching on missing data so
         # a fully unreachable instance still triggers the alarm
+        cw = get_boto_client('cloudwatch')
         status_alarm = f"EC2-StatusCheck-{inst_id}"
         if status_alarm not in INVENTORY['alarms'] or confirm_existing_resource("CloudWatch Alarm", status_alarm) not in ('SKIP', 'KEEP'):
             if require_approval("PutMetricAlarm", "CloudWatch", status_alarm, {"InstanceId": inst_id}, f"Instance Status Check Failed on {inst_name}"):
