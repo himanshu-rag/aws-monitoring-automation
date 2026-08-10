@@ -1147,11 +1147,12 @@ def deploy_cw_agent():
 # Alarm Orchestration
 # =============================================================================
 
-def create_alarm(sns_topic_arn, alarm_name, metric, namespace, 
-                 dimensions, threshold, description, 
-                 operator="GreaterThanThreshold", period=300, eval_periods=2):
+def create_alarm(sns_topic_arn, alarm_name, metric, namespace,
+                 dimensions, threshold, description,
+                 operator="GreaterThanThreshold", period=300, eval_periods=2,
+                 treat_missing="missing"):
     cw = get_boto_client('cloudwatch')
-    
+
     if alarm_name in INVENTORY['alarms']:
         action = confirm_existing_resource("CloudWatch Alarm", alarm_name)
         if action == 'SKIP':
@@ -1161,7 +1162,7 @@ def create_alarm(sns_topic_arn, alarm_name, metric, namespace,
         elif action == 'KEEP':
             logger.info(f"Keeping existing Alarm (no action): {alarm_name}")
             return
-            
+
     if require_approval(
         action="PutMetricAlarm",
         service="CloudWatch",
@@ -1183,7 +1184,7 @@ def create_alarm(sns_topic_arn, alarm_name, metric, namespace,
                 EvaluationPeriods=eval_periods,
                 Threshold=threshold,
                 ComparisonOperator=operator,
-                TreatMissingData="missing"
+                TreatMissingData=treat_missing
             )
             STATS['resources_created'] += 1
             logger.info(f"Created Alarm: {alarm_name}")
@@ -1234,28 +1235,31 @@ def configure_ec2_alarms(sns_topic_arn):
                      [{"Name": "InstanceId", "Value": inst_id}], 80.0, 
                      f"CPU > 80% on {inst_name} ({inst_id})")
         
-        # Status Check
-        cw = get_boto_client('cloudwatch')
+        # Status Check — uses Maximum statistic, breaching on missing data so
+        # a fully unreachable instance still triggers the alarm
         status_alarm = f"EC2-StatusCheck-{inst_id}"
-        if require_approval("PutMetricAlarm", "CloudWatch", status_alarm, {"InstanceId": inst_id}, f"Instance Status Check Failed on {inst_name}"):
-            try:
-                cw.put_metric_alarm(
-                    AlarmName=status_alarm,
-                    AlarmDescription=f"Status check failed on {inst_name}",
-                    ActionsEnabled=True,
-                    AlarmActions=[sns_topic_arn],
-                    MetricName="StatusCheckFailed",
-                    Namespace="AWS/EC2",
-                    Statistic="Maximum",
-                    Dimensions=[{"Name": "InstanceId", "Value": inst_id}],
-                    Period=300,
-                    EvaluationPeriods=1,
-                    Threshold=1.0,
-                    ComparisonOperator="GreaterThanOrEqualToThreshold"
-                )
-                STATS['resources_created'] += 1
-            except Exception as e:
-                logger.error(f"Failed to create status check alarm for {inst_id}: {e}")
+        if status_alarm not in INVENTORY['alarms'] or confirm_existing_resource("CloudWatch Alarm", status_alarm) not in ('SKIP', 'KEEP'):
+            if require_approval("PutMetricAlarm", "CloudWatch", status_alarm, {"InstanceId": inst_id}, f"Instance Status Check Failed on {inst_name}"):
+                try:
+                    cw.put_metric_alarm(
+                        AlarmName=status_alarm,
+                        AlarmDescription=f"Status check failed on {inst_name}",
+                        ActionsEnabled=True,
+                        AlarmActions=[sns_topic_arn],
+                        MetricName="StatusCheckFailed",
+                        Namespace="AWS/EC2",
+                        Statistic="Maximum",
+                        Dimensions=[{"Name": "InstanceId", "Value": inst_id}],
+                        Period=300,
+                        EvaluationPeriods=1,
+                        Threshold=1.0,
+                        ComparisonOperator="GreaterThanOrEqualToThreshold",
+                        TreatMissingData="breaching"
+                    )
+                    STATS['resources_created'] += 1
+                    logger.info(f"Created Alarm: {status_alarm}")
+                except Exception as e:
+                    logger.error(f"Failed to create status check alarm for {inst_id}: {e}")
 
         # Network Out
         create_alarm(sns_topic_arn, f"EC2-NetworkOut-{inst_id}", "NetworkOut", "AWS/EC2",
@@ -1265,30 +1269,33 @@ def configure_ec2_alarms(sns_topic_arn):
         # Memory, Swap, Disk, Inodes alarms — always created, activate once CW Agent starts
         inst_type = inst.get('Type', 'unknown')
 
-        # Memory — dims: InstanceId + InstanceType
+        # Memory — CWAgent metric: breaching so agent crash is also caught
         create_alarm(sns_topic_arn, f"EC2-Memory-{inst_id}", "mem_used_percent", "CWAgent",
                      [
                          {"Name": "InstanceId",   "Value": inst_id},
                          {"Name": "InstanceType", "Value": inst_type}
-                     ], 85.0, f"Memory Utilization > 85% on {inst_name}")
+                     ], 85.0, f"Memory Utilization > 85% on {inst_name}",
+                     treat_missing="breaching")
 
-        # Swap — dims: InstanceId + InstanceType
+        # Swap — CWAgent metric: breaching
         create_alarm(sns_topic_arn, f"EC2-Swap-{inst_id}", "swap_used_percent", "CWAgent",
                      [
                          {"Name": "InstanceId",   "Value": inst_id},
                          {"Name": "InstanceType", "Value": inst_type}
-                     ], 50.0, f"Swap Utilization > 50% on {inst_name}")
+                     ], 50.0, f"Swap Utilization > 50% on {inst_name}",
+                     treat_missing="breaching")
 
-        # Disk — correct metric name is disk_used_percent
+        # Disk — correct metric name is disk_used_percent; breaching
         disk_dims = get_metric_dimensions(inst_id, "disk_used_percent", inst_type)
         create_alarm(sns_topic_arn, f"EC2-DiskUsed-{inst_id}", "disk_used_percent", "CWAgent",
-                     disk_dims, 60.0, f"Disk Space > 60% on {inst_name}")
+                     disk_dims, 60.0, f"Disk Space > 60% on {inst_name}",
+                     treat_missing="breaching")
 
-        # Inodes — correct metric name is disk_inodes_free (alerts when free inodes drop too low)
+        # Inodes — alerts when free inodes drop too low; breaching
         inode_dims = get_metric_dimensions(inst_id, "disk_inodes_free", inst_type)
         create_alarm(sns_topic_arn, f"EC2-DiskInodes-{inst_id}", "disk_inodes_free", "CWAgent",
                      inode_dims, 1000000.0, f"Disk Inodes critically low on {inst_name}",
-                     operator="LessThanThreshold")
+                     operator="LessThanThreshold", treat_missing="breaching")
 
 def configure_rds_alarms(sns_topic_arn):
     print("\n--- Configuring RDS Alarms ---")
