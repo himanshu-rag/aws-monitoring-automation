@@ -1320,7 +1320,7 @@ def configure_rds_alarms(sns_topic_arn):
 def detect_web_services(instance_id):
     ssm = get_boto_client('ssm')
     detected = []
-    linux_cmd = "pgrep nginx && echo 'nginx' || true; pgrep httpd && echo 'apache' || true; pgrep apache2 && echo 'apache' || true; pgrep -f 'PM2' && echo 'pm2' || true;"
+    linux_cmd = "pgrep nginx && echo 'nginx' || true; pgrep httpd && echo 'apache' || true; pgrep apache2 && echo 'apache' || true; pgrep -i -f 'pm2' && echo 'pm2' || true;"
     win_cmd = "if (Get-Process -Name w3wp -ErrorAction SilentlyContinue) { Write-Host 'iis' }"
     
     platform = "Linux"
@@ -1424,7 +1424,7 @@ def configure_web_monitoring():
             if service == "pm2":
                 # PM2 runs as a Node.js daemon — must use pattern matching, not exe
                 procstat_config.append({
-                    "pattern": "PM2",
+                    "pattern": "(?i)pm2",
                     "measurement": ["cpu_usage", "memory_rss", "pid_count"]
                 })
             else:
@@ -1492,7 +1492,7 @@ def configure_web_monitoring():
                             process_dims = [
                                 {"Name": "InstanceId",   "Value": inst_id},
                                 {"Name": "InstanceType", "Value": inst_type},
-                                {"Name": "pattern",      "Value": "PM2"},
+                                {"Name": "pattern",      "Value": "(?i)pm2"},
                                 {"Name": "pid_finder",   "Value": "native"}
                             ]
                         else:
