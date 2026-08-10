@@ -2097,20 +2097,21 @@ def configure_application_monitoring(role_arn, sns_topic_arn):
                 STATS['resources_created'] += 1
                 
                 alarm_name = f"Synthetics-Failed-{canary_name}"
-                if require_approval("PutMetricAlarm", "CloudWatch", alarm_name, {"Canary": canary_name}, f"Alerts when canary {canary_name} fails."):
+                if require_approval("PutMetricAlarm", "CloudWatch", alarm_name, {"Canary": canary_name}, f"Alerts when canary {canary_name} success rate drops below 100%."):
                     cw.put_metric_alarm(
                         AlarmName=alarm_name,
                         AlarmDescription=f"Application Health Check Failed for {url}",
                         ActionsEnabled=True,
                         AlarmActions=[sns_topic_arn],
-                        MetricName="Failed",
+                        MetricName="SuccessPercent",
                         Namespace="CloudWatchSynthetics",
-                        Statistic="Sum",
+                        Statistic="Average",
                         Dimensions=[{"Name": "CanaryName", "Value": canary_name}],
                         Period=300,
                         EvaluationPeriods=1,
-                        Threshold=1.0,
-                        ComparisonOperator="GreaterThanOrEqualToThreshold"
+                        Threshold=100.0,
+                        ComparisonOperator="LessThanThreshold",
+                        TreatMissingData="breaching"
                     )
                     logger.info(f"Deployed Canary & Alarm for {url}")
                     STATS['resources_created'] += 1
@@ -2145,7 +2146,10 @@ def configure_cloudtrail_auditing():
                 pass
             
             res = logs.describe_log_groups(logGroupNamePrefix=log_group_name)
-            log_group = next(lg for lg in res['logGroups'] if lg['logGroupName'] == log_group_name)
+            log_group = next((lg for lg in res['logGroups'] if lg['logGroupName'] == log_group_name), None)
+            if not log_group:
+                logger.error(f"Log group {log_group_name} not found after creation. Skipping audit rule.")
+                return
             log_group_arn = log_group['arn']
             if not log_group_arn.endswith(':*'):
                 log_group_arn = f"{log_group_arn}:*"
