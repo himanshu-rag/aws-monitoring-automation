@@ -2356,6 +2356,56 @@ def generate_dashboard():
         "type": "metric", "x": 12, "y": y_offset, "width": 12, "height": 6,
         "properties": {"metrics": sns_metrics, "view": "timeSeries", "stacked": False, "region": AWS_REGION, "title": "SNS Operations"}
     })
+    y_offset += 6
+
+    # 7. Process Health — shows pid count for Nginx, Apache, PM2, MySQL, etc.
+    # Scans INVENTORY alarms for Web-ProcessDown and DB-ProcessDown to auto-build widget entries
+    process_metrics = []
+    for alarm_name in INVENTORY['alarms']:
+        if alarm_name.startswith("Web-ProcessDown-") or alarm_name.startswith("DB-ProcessDown-"):
+            parts = alarm_name.split("-")
+            # Format: Web-ProcessDown-<inst_id>-<service>  or  DB-ProcessDown-<inst_id>-<engine>
+            # inst_id is parts[2], service is parts[3]
+            if len(parts) >= 4:
+                inst_id  = parts[2]
+                service  = parts[3]
+                # PM2 uses pattern dimension, others use exe
+                if service == "pm2":
+                    process_metrics.append([
+                        "CWAgent", "procstat_lookup_pid_count",
+                        "InstanceId", inst_id,
+                        "pattern", "PM2",
+                        "pid_finder", "native",
+                        {"label": f"{inst_id[:8]} - PM2"}
+                    ])
+                else:
+                    exe_map = {
+                        "nginx": "nginx", "apache": "httpd", "iis": "w3wp",
+                        "mysql": "mysqld", "postgres": "postgres",
+                        "mongodb": "mongod", "redis": "redis-server",
+                        "sqlserver": "sqlservr", "oracle": "oracle"
+                    }
+                    exe_name = exe_map.get(service, service)
+                    process_metrics.append([
+                        "CWAgent", "procstat_lookup_pid_count",
+                        "InstanceId", inst_id,
+                        "exe", exe_name,
+                        "pid_finder", "native",
+                        {"label": f"{inst_id[:8]} - {service}"}
+                    ])
+
+    if process_metrics:
+        widgets.append({
+            "type": "metric", "x": 0, "y": y_offset, "width": 24, "height": 6,
+            "properties": {
+                "metrics": process_metrics,
+                "view": "timeSeries",
+                "stacked": False,
+                "region": AWS_REGION,
+                "title": "Process Health (PID Count — Nginx / Apache / PM2 / MySQL / Redis)"
+            }
+        })
+        y_offset += 6
 
     if not widgets:
         return
