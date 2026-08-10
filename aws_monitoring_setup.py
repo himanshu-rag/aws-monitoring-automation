@@ -2363,41 +2363,31 @@ def generate_dashboard():
     })
     y_offset += 6
 
-    # 7. Process Health — shows pid count for Nginx, Apache, PM2, MySQL, etc.
-    # Scans INVENTORY alarms for Web-ProcessDown and DB-ProcessDown to auto-build widget entries
+    # 7. Process Health — directly queries CloudWatch for live procstat metrics
+    # Builds from INVENTORY ec2 so it works even after --clean-alarms deletes old alarm list
     process_metrics = []
-    for alarm_name in INVENTORY['alarms']:
-        if alarm_name.startswith("Web-ProcessDown-") or alarm_name.startswith("DB-ProcessDown-"):
-            parts = alarm_name.split("-")
-            # Format: Web-ProcessDown-<inst_id>-<service>  or  DB-ProcessDown-<inst_id>-<engine>
-            # inst_id is parts[2], service is parts[3]
-            if len(parts) >= 4:
-                inst_id  = parts[2]
-                service  = parts[3]
-                # PM2 uses pattern dimension, others use exe
-                if service == "pm2":
-                    process_metrics.append([
-                        "CWAgent", "procstat_lookup_pid_count",
-                        "InstanceId", inst_id,
-                        "pattern", "PM2",
-                        "pid_finder", "native",
-                        {"label": f"{inst_id[:8]} - PM2"}
-                    ])
-                else:
-                    exe_map = {
-                        "nginx": "nginx", "apache": "httpd", "iis": "w3wp",
-                        "mysql": "mysqld", "postgres": "postgres",
-                        "mongodb": "mongod", "redis": "redis-server",
-                        "sqlserver": "sqlservr", "oracle": "oracle"
-                    }
-                    exe_name = exe_map.get(service, service)
-                    process_metrics.append([
-                        "CWAgent", "procstat_lookup_pid_count",
-                        "InstanceId", inst_id,
-                        "exe", exe_name,
-                        "pid_finder", "native",
-                        {"label": f"{inst_id[:8]} - {service}"}
-                    ])
+    for inst in INVENTORY['ec2']:
+        inst_id   = inst['Id']
+        inst_type = inst.get('Type', 'unknown')
+        inst_name = inst.get('Name', inst_id[:8])
+        # Scan for all procstat_lookup_pid_count metrics reported by this instance
+        try:
+            res = cw.list_metrics(
+                Namespace="CWAgent",
+                MetricName="procstat_lookup_pid_count",
+                Dimensions=[{"Name": "InstanceId", "Value": inst_id}]
+            )
+            for m in res.get('Metrics', []):
+                dims = {d['Name']: d['Value'] for d in m.get('Dimensions', [])}
+                metric_entry = ["CWAgent", "procstat_lookup_pid_count"]
+                for d in m.get('Dimensions', []):
+                    metric_entry += [d['Name'], d['Value']]
+                # Use exe or pattern as the label
+                svc_label = dims.get('exe', dims.get('pattern', 'process'))
+                metric_entry.append({"label": f"{inst_name} - {svc_label}"})
+                process_metrics.append(metric_entry)
+        except Exception as e:
+            logger.warning(f"Could not fetch procstat metrics for {inst_id}: {e}")
 
     if process_metrics:
         widgets.append({
@@ -2407,7 +2397,7 @@ def generate_dashboard():
                 "view": "timeSeries",
                 "stacked": False,
                 "region": AWS_REGION,
-                "title": "Process Health (PID Count — Nginx / Apache / PM2 / MySQL / Redis)"
+                "title": "Process Health — PID Count (Nginx / PM2 / MySQL / Redis)"
             }
         })
         y_offset += 6
