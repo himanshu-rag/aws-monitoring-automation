@@ -2247,7 +2247,7 @@ def generate_dashboard():
         y_offset += 4
         
     # 2. EC2 Compute — Memory uses InstanceId + InstanceType
-    ec2_cpu = [["AWS/EC2", "CPUUtilization"]]
+    ec2_cpu = []
     ec2_mem = []
     for inst in INVENTORY['ec2']:
         ec2_cpu.append(["AWS/EC2", "CPUUtilization", "InstanceId", inst['Id'], {"label": inst['Name']}])
@@ -2296,12 +2296,12 @@ def generate_dashboard():
     y_offset += 6
 
     # 4. Network / RDS / S3
-    ec2_net = [["AWS/EC2", "NetworkIn"], ["AWS/EC2", "NetworkOut"]]
+    ec2_net = []
     for inst in INVENTORY['ec2']:
         ec2_net.append(["AWS/EC2", "NetworkIn", "InstanceId", inst['Id'], {"label": f"{inst['Name']} In"}])
         ec2_net.append(["AWS/EC2", "NetworkOut", "InstanceId", inst['Id'], {"label": f"{inst['Name']} Out"}])
         
-    rds_cpu = [["AWS/RDS", "CPUUtilization"]]
+    rds_cpu = []
     for db in INVENTORY['rds']:
         rds_cpu.append(["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", db['Id']])
         
