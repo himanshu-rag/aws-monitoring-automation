@@ -1312,7 +1312,7 @@ def configure_rds_alarms(sns_topic_arn):
 def detect_web_services(instance_id):
     ssm = get_boto_client('ssm')
     detected = []
-    linux_cmd = "pgrep nginx && echo 'nginx' || true; pgrep httpd && echo 'apache' || true; pgrep apache2 && echo 'apache' || true;"
+    linux_cmd = "pgrep nginx && echo 'nginx' || true; pgrep httpd && echo 'apache' || true; pgrep apache2 && echo 'apache' || true; pgrep -f 'PM2' && echo 'pm2' || true;"
     win_cmd = "if (Get-Process -Name w3wp -ErrorAction SilentlyContinue) { Write-Host 'iis' }"
     
     platform = "Linux"
@@ -1350,6 +1350,8 @@ def detect_web_services(instance_id):
                             detected.append('apache')
                         if 'iis' in output:
                             detected.append('iis')
+                        if 'pm2' in output:
+                            detected.append('pm2')
                         break
                 except ssm.exceptions.InvocationDoesNotExist:
                     pass
@@ -1411,11 +1413,18 @@ def configure_web_monitoring():
         logger.info(f"Detected web servers on {inst_id}: {web_services}")
         procstat_config = []
         for service in web_services:
-            exe_name = "nginx" if service == "nginx" else ("httpd" if service == "apache" else "w3wp")
-            procstat_config.append({
-                "exe": exe_name,
-                "measurement": ["cpu_usage", "memory_rss", "pid_count"]
-            })
+            if service == "pm2":
+                # PM2 runs as a Node.js daemon — must use pattern matching, not exe
+                procstat_config.append({
+                    "pattern": "PM2",
+                    "measurement": ["cpu_usage", "memory_rss", "pid_count"]
+                })
+            else:
+                exe_name = "nginx" if service == "nginx" else ("httpd" if service == "apache" else "w3wp")
+                procstat_config.append({
+                    "exe": exe_name,
+                    "measurement": ["cpu_usage", "memory_rss", "pid_count"]
+                })
             
         param_name = f"AmazonCloudWatch-WebConfig-{inst_id}"
         cw_config = {
@@ -1467,9 +1476,26 @@ def configure_web_monitoring():
                     STATS['resources_created'] += 1
                     
                     for service in web_services:
-                        exe_name = "nginx" if service == "nginx" else ("httpd" if service == "apache" else "w3wp")
                         alarm_name = f"Web-ProcessDown-{inst_id}-{service}"
-                        
+                        inst_type = INVENTORY['ec2'][next((i for i, x in enumerate(INVENTORY['ec2']) if x['Id'] == inst_id), 0)].get('Type', 'unknown')
+
+                        # PM2 uses 'pattern' dimension; all others use 'exe' dimension
+                        if service == "pm2":
+                            process_dims = [
+                                {"Name": "InstanceId",   "Value": inst_id},
+                                {"Name": "InstanceType", "Value": inst_type},
+                                {"Name": "pattern",      "Value": "PM2"},
+                                {"Name": "pid_finder",   "Value": "native"}
+                            ]
+                        else:
+                            exe_name = "nginx" if service == "nginx" else ("httpd" if service == "apache" else "w3wp")
+                            process_dims = [
+                                {"Name": "InstanceId",   "Value": inst_id},
+                                {"Name": "InstanceType", "Value": inst_type},
+                                {"Name": "exe",          "Value": exe_name},
+                                {"Name": "pid_finder",   "Value": "native"}
+                            ]
+
                         if require_approval(
                             action="PutMetricAlarm",
                             service="CloudWatch",
@@ -1487,12 +1513,7 @@ def configure_web_monitoring():
                                     MetricName="procstat_lookup_pid_count",
                                     Namespace="CWAgent",
                                     Statistic="Average",
-                                    Dimensions=[
-                                        {"Name": "InstanceId",   "Value": inst_id},
-                                        {"Name": "InstanceType", "Value": INVENTORY['ec2'][next((i for i, x in enumerate(INVENTORY['ec2']) if x['Id'] == inst_id), 0)].get('Type', 'unknown')},
-                                        {"Name": "exe",          "Value": exe_name},
-                                        {"Name": "pid_finder",   "Value": "native"}
-                                    ],
+                                    Dimensions=process_dims,
                                     Period=60,
                                     EvaluationPeriods=1,
                                     Threshold=1.0,
@@ -1501,17 +1522,18 @@ def configure_web_monitoring():
                                 )
                                 logger.info(f"Created alarm {alarm_name}")
                                 STATS['resources_created'] += 1
-                                
-                                # Auto restart query
-                                try:
-                                    if AUTO_APPROVE:
+
+                                # Auto restart query (only for supported web services, not pm2)
+                                if service != "pm2":
+                                    try:
+                                        if AUTO_APPROVE:
+                                            restart_choice = 'N'
+                                        else:
+                                            restart_choice = input(f"Would you like to auto-restart {service} on {inst_id} if detected as down? [Y] Yes | [N] No : ").strip().upper()
+                                    except EOFError:
                                         restart_choice = 'N'
-                                    else:
-                                        restart_choice = input(f"Would you like to auto-restart {service} on {inst_id} if detected as down? [Y] Yes | [N] No : ").strip().upper()
-                                except EOFError:
-                                    restart_choice = 'N'
-                                if restart_choice == 'Y':
-                                    restart_web_service(inst_id, service)
+                                    if restart_choice == 'Y':
+                                        restart_web_service(inst_id, service)
                                     
             except Exception as e:
                 logger.error(f"Failed to configure Web monitoring on {inst_id}: {e}")
